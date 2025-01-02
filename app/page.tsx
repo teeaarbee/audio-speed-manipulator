@@ -82,36 +82,42 @@ export default function Home() {
       const source = offlineContext.createBufferSource();
       source.buffer = audioBuffer;
 
-      // Create a ScriptProcessorNode for pitch-preserved time stretching
-      const frameSize = 2048;
-      const processor = offlineContext.createScriptProcessor(frameSize, 1, 1);
+      // Create processor node
+      const bufferSize = 4096;
+      const processor = offlineContext.createScriptProcessor(bufferSize, audioBuffer.numberOfChannels, audioBuffer.numberOfChannels);
       
-      let phase = 0;
-      let lastPhase = 0;
-      let sumPhase = 0;
-      let expectedPhase = 0;
-      let omega = (2 * Math.PI * frameSize) / audioBuffer.sampleRate;
+      let readPosition = 0;
 
       processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
         const outputData = e.outputBuffer.getChannelData(0);
+        const inputData = audioBuffer.getChannelData(0);
+        
+        for (let i = 0; i < bufferSize; i++) {
+          // Linear interpolation for smooth playback
+          const exactReadPosition = readPosition | 0; // integer part
+          const fraction = readPosition - exactReadPosition; // fractional part
+          
+          const sample1 = inputData[exactReadPosition] || 0;
+          const sample2 = inputData[exactReadPosition + 1] || 0;
+          
+          // Interpolate between samples
+          outputData[i] = sample1 + fraction * (sample2 - sample1);
+          
+          readPosition += playbackRate;
+          if (readPosition >= inputData.length) {
+            readPosition = 0;
+          }
+        }
 
-        for (let i = 0; i < frameSize; i++) {
-          // Phase vocoder algorithm
-          phase = Math.atan2(inputData[i], lastPhase);
-          let unwrappedPhase = phase + 2 * Math.PI * Math.round((expectedPhase - phase) / (2 * Math.PI));
-          let instantFreq = (unwrappedPhase - lastPhase) / omega;
-
-          // Maintain pitch while changing speed
-          sumPhase += instantFreq * omega * playbackRate;
-          outputData[i] = Math.cos(sumPhase);
-
-          lastPhase = phase;
-          expectedPhase += omega * playbackRate;
+        // Process other channels if they exist
+        for (let channel = 1; channel < audioBuffer.numberOfChannels; channel++) {
+          const outputChannelData = e.outputBuffer.getChannelData(channel);
+          const inputChannelData = audioBuffer.getChannelData(channel);
+          outputChannelData.set(outputChannelData);
         }
       };
 
-      // Connect the nodes
+      // Connect nodes
       source.connect(processor);
       processor.connect(offlineContext.destination);
       source.start(0);
