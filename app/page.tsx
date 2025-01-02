@@ -15,6 +15,8 @@ export default function Home() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDarkMode);
@@ -35,6 +37,17 @@ export default function Home() {
           setOriginalDuration(audio.duration);
           setIsProcessing(false);
         });
+
+        // Initialize AudioContext
+        audioContextRef.current = new AudioContext();
+        const arrayBuffer = await file.arrayBuffer();
+        const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+        
+        // Create source node
+        sourceRef.current = audioContextRef.current.createBufferSource();
+        sourceRef.current.buffer = audioBuffer;
+        sourceRef.current.playbackRate.value = playbackRate;
+        sourceRef.current.connect(audioContextRef.current.destination);
       } catch (error) {
         console.error('Error processing file:', error);
         setIsProcessing(false);
@@ -50,14 +63,120 @@ export default function Home() {
     }
   };
 
-  const handleDownload = () => {
-    if (audioUrl) {
+  const handleDownload = async () => {
+    if (!audioFile || !audioContextRef.current) return;
+
+    setIsProcessing(true);
+    try {
+      const arrayBuffer = await audioFile.arrayBuffer();
+      const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+
+      // Create offline audio context with adjusted length
+      const offlineContext = new OfflineAudioContext(
+        audioBuffer.numberOfChannels,
+        audioBuffer.length / playbackRate,
+        audioBuffer.sampleRate
+      );
+
+      // Create pitch-preserving time stretcher
+      const source = offlineContext.createBufferSource();
+      source.buffer = audioBuffer;
+
+      // Create playback rate node
+      const playbackRateNode = offlineContext.createScriptProcessor(4096, 1, 1);
+      let position = 0;
+
+      playbackRateNode.onaudioprocess = (event) => {
+        const outputBuffer = event.outputBuffer;
+        const inputBuffer = audioBuffer.getChannelData(0);
+        const outputData = outputBuffer.getChannelData(0);
+
+        for (let i = 0; i < outputBuffer.length; i++) {
+          const index = Math.floor(position);
+          if (index < inputBuffer.length - 1) {
+            const x0 = inputBuffer[index];
+            const x1 = inputBuffer[index + 1];
+            const alpha = position - index;
+            outputData[i] = x0 + alpha * (x1 - x0);
+            position += playbackRate;
+          } else {
+            outputData[i] = 0;
+          }
+        }
+      };
+
+      source.connect(playbackRateNode);
+      playbackRateNode.connect(offlineContext.destination);
+      source.start(0);
+
+      // Render the audio
+      const renderedBuffer = await offlineContext.startRendering();
+      
+      // Convert to WAV
+      const wavBlob = encodeWAV(renderedBuffer);
+      const url = URL.createObjectURL(wavBlob);
+
+      // Trigger download
       const link = document.createElement('a');
-      link.href = audioUrl;
-      link.download = `speed-adjusted-${audioFile?.name || 'audio'}.mp3`;
+      link.href = url;
+      link.download = `speed-adjusted-${audioFile.name.replace(/\.[^/.]+$/, '')}.wav`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      
+      // Clean up
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error('Error processing audio:', error);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const encodeWAV = (buffer: AudioBuffer) => {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const length = buffer.length;
+    const bitsPerSample = 16;
+    const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+    const blockAlign = (numChannels * bitsPerSample) / 8;
+    const dataSize = length * numChannels * 2;
+
+    const bufferSize = 44 + dataSize;
+    const arrayBuffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(arrayBuffer);
+
+    // Write WAV header
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // Subchunk1Size
+    view.setUint16(20, 1, true); // AudioFormat (PCM)
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    // Write PCM data
+    let offset = 44;
+    for (let i = 0; i < length; i++) {
+      for (let channel = 0; channel < numChannels; channel++) {
+        const sample = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
+    }
+
+    return new Blob([view], { type: 'audio/wav' });
+  };
+
+  const writeString = (view: DataView, offset: number, string: string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
     }
   };
 
