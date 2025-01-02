@@ -74,39 +74,15 @@ export default function Home() {
       // Create offline audio context with adjusted length
       const offlineContext = new OfflineAudioContext(
         audioBuffer.numberOfChannels,
-        audioBuffer.length / playbackRate,
+        Math.ceil(audioBuffer.length / playbackRate),
         audioBuffer.sampleRate
       );
 
-      // Create pitch-preserving time stretcher
+      // Create source node
       const source = offlineContext.createBufferSource();
       source.buffer = audioBuffer;
-
-      // Create playback rate node
-      const playbackRateNode = offlineContext.createScriptProcessor(4096, 1, 1);
-      let position = 0;
-
-      playbackRateNode.onaudioprocess = (event) => {
-        const outputBuffer = event.outputBuffer;
-        const inputBuffer = audioBuffer.getChannelData(0);
-        const outputData = outputBuffer.getChannelData(0);
-
-        for (let i = 0; i < outputBuffer.length; i++) {
-          const index = Math.floor(position);
-          if (index < inputBuffer.length - 1) {
-            const x0 = inputBuffer[index];
-            const x1 = inputBuffer[index + 1];
-            const alpha = position - index;
-            outputData[i] = x0 + alpha * (x1 - x0);
-            position += playbackRate;
-          } else {
-            outputData[i] = 0;
-          }
-        }
-      };
-
-      source.connect(playbackRateNode);
-      playbackRateNode.connect(offlineContext.destination);
+      source.playbackRate.value = playbackRate;
+      source.connect(offlineContext.destination);
       source.start(0);
 
       // Render the audio
