@@ -71,7 +71,7 @@ export default function Home() {
       const arrayBuffer = await audioFile.arrayBuffer();
       const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
 
-      // Create offline audio context with adjusted length
+      // Create offline context for processing
       const offlineContext = new OfflineAudioContext(
         audioBuffer.numberOfChannels,
         Math.ceil(audioBuffer.length / playbackRate),
@@ -81,13 +81,44 @@ export default function Home() {
       // Create source node
       const source = offlineContext.createBufferSource();
       source.buffer = audioBuffer;
-      source.playbackRate.value = playbackRate;
-      source.connect(offlineContext.destination);
+
+      // Create a ScriptProcessorNode for pitch-preserved time stretching
+      const frameSize = 2048;
+      const processor = offlineContext.createScriptProcessor(frameSize, 1, 1);
+      
+      let phase = 0;
+      let lastPhase = 0;
+      let sumPhase = 0;
+      let expectedPhase = 0;
+      let omega = (2 * Math.PI * frameSize) / audioBuffer.sampleRate;
+
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        const outputData = e.outputBuffer.getChannelData(0);
+
+        for (let i = 0; i < frameSize; i++) {
+          // Phase vocoder algorithm
+          phase = Math.atan2(inputData[i], lastPhase);
+          let unwrappedPhase = phase + 2 * Math.PI * Math.round((expectedPhase - phase) / (2 * Math.PI));
+          let instantFreq = (unwrappedPhase - lastPhase) / omega;
+
+          // Maintain pitch while changing speed
+          sumPhase += instantFreq * omega * playbackRate;
+          outputData[i] = Math.cos(sumPhase);
+
+          lastPhase = phase;
+          expectedPhase += omega * playbackRate;
+        }
+      };
+
+      // Connect the nodes
+      source.connect(processor);
+      processor.connect(offlineContext.destination);
       source.start(0);
 
-      // Render the audio
+      // Render the processed audio
       const renderedBuffer = await offlineContext.startRendering();
-      
+
       // Convert to WAV
       const wavBlob = encodeWAV(renderedBuffer);
       const url = URL.createObjectURL(wavBlob);
@@ -99,7 +130,7 @@ export default function Home() {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      
+
       // Clean up
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
